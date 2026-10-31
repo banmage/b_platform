@@ -1,0 +1,4498 @@
+openapi: 3.1.0
+info:
+  title: b_platform Core API
+  version: 2.0.0
+  summary: 通用业务底座平台控制面 API
+  description: |
+    b_platform 的核心控制面契约。
+
+    - 用户/租户 API 前缀：`/api/v1`
+    - 平台控制面 API 前缀：`/api/platform/v1`
+    - 扩展 API 前缀：`/api/v1/ext/<module>`
+    - 认证：JWT Bearer 或 API Key
+    - 错误：RFC 9457 Problem Details 风格
+    - 分页：cursor
+    - 关键写操作：`Idempotency-Key`
+    - 权限点通过 `x-permission` 声明，语义见权限模型 V2.0
+    - 错误码以 `Problem.code` 枚举为准，权威清单见审计/事件/错误码目录（docs/20-design）
+    - 一期不支持的操作（父组织变更、物理删除、组织/租户迁移等）返回 `405 NOT_SUPPORTED` Problem；因目标处于不可转换状态而被拒时返回 `409 STATE_CONFLICT`（状态机 §7.2 规则 5）
+
+    本文档是 API 的唯一权威来源；实现变更必须先改契约。
+  contact:
+    name: b_platform
+    url: https://platform.example.com
+  license:
+    name: Proprietary
+servers:
+  - url: https://platform.example.com
+    description: Production
+  - url: http://localhost:8080
+    description: Local
+tags:
+  - name: Auth
+    description: 注册、登录、刷新、验证、上下文切换
+  - name: Me
+    description: 当前用户
+  - name: Tenant
+    description: 租户内成员、角色、配置、审计
+  - name: Organization
+    description: 租户内组织、成员、角色、所有权
+  - name: ServiceAccount
+    description: 服务账号与 API Key
+  - name: Webhook
+    description: 租户 Webhook
+  - name: Platform
+    description: 平台控制面
+  - name: Health
+    description: 健康检查
+security:
+  - bearerAuth: []
+  - apiKeyAuth: []
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      operationId: healthz
+      summary: 进程存活
+      security: []
+      responses:
+        '200':
+          description: alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+  /readyz:
+    get:
+      tags: [Health]
+      operationId: readyz
+      summary: 就绪检查
+      security: []
+      responses:
+        '200':
+          description: ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        '503':
+          description: not ready
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /.well-known/jwks.json:
+    get:
+      tags: [Auth]
+      operationId: getJwks
+      summary: JWKS 公钥
+      security: []
+      responses:
+        '200':
+          description: JWKS
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [keys]
+                properties:
+                  keys:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+
+  /api/v1/auth/register:
+    post:
+      tags: [Auth]
+      operationId: register
+      summary: 注册用户
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: 账号密码登录
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthTokens'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '423':
+          description: account locked
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [Auth]
+      operationId: refresh
+      summary: 刷新 Token（旋转 + 重用检测）
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: refreshed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthTokens'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /api/v1/auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logout
+      x-subject-authz: session-owner
+      summary: 登出
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LogoutRequest'
+      responses:
+        '204': { description: logged out }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/auth/password/forgot:
+    post:
+      tags: [Auth]
+      operationId: forgotPassword
+      summary: 请求密码重置
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordForgotRequest'
+      responses:
+        '202': { description: accepted }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /api/v1/auth/password/reset:
+    post:
+      tags: [Auth]
+      operationId: resetPassword
+      summary: 使用一次性令牌重置密码
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordResetRequest'
+      responses:
+        '204': { description: password reset }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /api/v1/auth/verify/email:
+    post:
+      tags: [Auth]
+      operationId: verifyEmail
+      summary: 验证邮箱
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyRequest'
+      responses:
+        '204': { description: verified }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/auth/verify/phone:
+    post:
+      tags: [Auth]
+      operationId: verifyPhone
+      summary: 验证手机号
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyRequest'
+      responses:
+        '204': { description: verified }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/auth/context/switch:
+    post:
+      tags: [Auth]
+      operationId: switchContext
+      x-subject-authz: self
+      summary: 切换租户/组织上下文并重新签发 Access Token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ContextSwitchRequest'
+      responses:
+        '200':
+          description: switched
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContextSwitchResponse'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/auth/sessions:
+    get:
+      tags: [Auth]
+      operationId: listSessions
+      x-subject-authz: session-owner
+      summary: 查看自己的会话
+      parameters:
+        - $ref: '#/components/parameters/CurrentSessionId'
+      responses:
+        '200':
+          description: sessions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/auth/sessions/{sessionId}:
+    delete:
+      tags: [Auth]
+      operationId: revokeSession
+      x-subject-authz: session-owner
+      summary: 撤销自己的会话
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '204': { description: revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/me:
+    get:
+      tags: [Me]
+      operationId: getMe
+      x-subject-authz: self
+      summary: 当前用户信息
+      responses:
+        '200':
+          description: me
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Me'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    patch:
+      tags: [Me]
+      operationId: updateMe
+      x-subject-authz: self
+      summary: 更新自己的资料
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MeUpdate'
+      responses:
+        '200':
+          description: updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Me'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+  /api/v1/me/password:
+    put:
+      tags: [Me]
+      operationId: changePassword
+      x-subject-authz: self
+      summary: 修改自己的密码
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangePasswordRequest'
+      responses:
+        '204': { description: changed }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /api/v1/me/permissions:
+    get:
+      tags: [Me]
+      operationId: getMyPermissions
+      x-subject-authz: self
+      summary: 当前作用域的有效权限
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/OrganizationHeader'
+      responses:
+        '200':
+          description: permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PermissionSet'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/me/memberships:
+    get:
+      tags: [Me]
+      operationId: listMyMemberships
+      x-subject-authz: self
+      summary: 我的租户/组织成员关系
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: memberships
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MyMembershipList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/tenant:
+    get:
+      tags: [Tenant]
+      operationId: getTenant
+      summary: 当前租户信息
+      x-permission: tenant.read
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '200':
+          description: tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Tenant]
+      operationId: updateTenant
+      summary: 更新租户基本信息
+      x-permission: tenant.update
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TenantUpdate'
+      responses:
+        '200':
+          description: updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+  /api/v1/tenant/config:
+    get:
+      tags: [Tenant]
+      operationId: getTenantConfig
+      summary: 查看租户配置
+      x-permission: tenant.config.read
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+      responses:
+        '200':
+          description: config
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantConfig'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      tags: [Tenant]
+      operationId: updateTenantConfig
+      summary: 更新租户配置
+      x-permission: tenant.config.update
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TenantConfig'
+      responses:
+        '200':
+          description: updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantConfig'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/tenant/members:
+    get:
+      tags: [Tenant]
+      operationId: listTenantMembers
+      summary: 租户成员列表
+      x-permission: tenant.member.read
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/MembershipStatus'
+      responses:
+        '200':
+          description: members
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MembershipList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/tenant/members/invitations:
+    post:
+      tags: [Tenant]
+      operationId: inviteTenantMember
+      summary: 邀请租户成员
+      x-permission: tenant.member.invite
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InvitationCreate'
+      responses:
+        '201':
+          description: invited
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invitation'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/tenant/members/{membershipId}:
+    delete:
+      tags: [Tenant]
+      operationId: removeTenantMember
+      summary: 移除租户成员
+      x-permission: tenant.member.remove
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/MembershipId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204': { description: removed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/tenant/members/{membershipId}/suspend:
+    post:
+      tags: [Tenant]
+      operationId: suspendTenantMember
+      summary: 暂停租户成员
+      x-permission: tenant.member.suspend
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/MembershipId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: suspended
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Membership'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/tenant/members/{membershipId}/activate:
+    post:
+      tags: [Tenant]
+      operationId: activateTenantMember
+      summary: 恢复租户成员
+      x-permission: tenant.member.activate
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/MembershipId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: activated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Membership'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/tenant/members/{membershipId}/roles:
+    put:
+      tags: [Tenant]
+      operationId: setTenantMemberRoles
+      summary: 设置租户成员角色
+      x-permission: tenant.role.assign
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/MembershipId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoleAssignmentUpdate'
+      responses:
+        '200':
+          description: updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Membership'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/tenant/roles:
+    get:
+      tags: [Tenant]
+      operationId: listTenantRoles
+      summary: 租户角色列表
+      x-permission: tenant.role.read
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: roles
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoleList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Tenant]
+      operationId: createTenantRole
+      summary: 创建租户角色
+      x-permission: tenant.role.manage
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoleCreate'
+      responses:
+        '201':
+          description: created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Role'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/tenant/roles/{roleId}:
+    get:
+      tags: [Tenant]
+      operationId: getTenantRole
+      summary: 租户角色详情
+      x-permission: tenant.role.read
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/RoleId'
+      responses:
+        '200':
+          description: role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Role'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Tenant]
+      operationId: updateTenantRole
+      summary: 更新租户角色
+      x-permission: tenant.role.manage
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/RoleId'
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoleUpdate'
+      responses:
+        '200':
+          description: updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Role'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+  /api/v1/tenant/roles/{roleId}/permissions:
+    put:
+      tags: [Tenant]
+      operationId: setTenantRolePermissions
+      summary: 设置租户角色权限
+      x-permission: tenant.role.manage
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/RoleId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RolePermissionsUpdate'
+      responses:
+        '200':
+          description: updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Role'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/tenant/organizations:
+    get:
+      tags: [Tenant]
+      operationId: listTenantOrganizations
+      summary: 租户组织列表/树
+      x-permission: tenant.organization.read
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: parent_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: include_descendants
+          in: query
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: organizations
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrganizationList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Tenant]
+      operationId: createOrganization
+      summary: 创建组织（可能进入审批）
+      x-permission: tenant.organization.create
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrganizationCreate'
+      responses:
+        '201':
+          description: created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Organization'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/tenant/organizations/{organizationId}/approve:
+    post:
+      tags: [Tenant]
+      operationId: decideOrganizationApproval
+      summary: 审批组织创建
+      x-permission: tenant.organization.approve
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/OrganizationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApprovalDecision'
+      responses:
+        '200':
+          description: decided
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Organization'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/tenant/audit:
+    get:
+      tags: [Tenant]
+      operationId: listTenantAudit
+      summary: 查询租户审计
+      x-permission: tenant.audit.read
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: action
+          in: query
+          schema:
+            type: string
+        - name: actor_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: audit events
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditEventList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/tenant/audit/export:
+    post:
+      tags: [Tenant]
+      operationId: exportTenantAudit
+      summary: 导出租户审计
+      x-permission: tenant.audit.export
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuditExportRequest'
+      responses:
+        '202':
+          description: accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditExport'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /api/v1/tenant/service-accounts:
+    get:
+      tags: [ServiceAccount]
+      operationId: listTenantServiceAccounts
+      summary: 租户服务账号列表
+      x-permission: tenant.service_account.read
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: service accounts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceAccountList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [ServiceAccount]
+      operationId: createTenantServiceAccount
+      summary: 创建租户服务账号
+      x-permission: tenant.service_account.manage
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceAccountCreate'
+      responses:
+        '201':
+          description: created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceAccountCreated'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/tenant/service-accounts/{serviceAccountId}:
+    get:
+      tags: [ServiceAccount]
+      operationId: getTenantServiceAccount
+      summary: 租户服务账号详情
+      x-permission: tenant.service_account.read
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/ServiceAccountId'
+      responses:
+        '200':
+          description: service account
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceAccount'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [ServiceAccount]
+      operationId: updateTenantServiceAccount
+      summary: 更新租户服务账号
+      x-permission: tenant.service_account.manage
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/ServiceAccountId'
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceAccountUpdate'
+      responses:
+        '200':
+          description: updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceAccount'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/tenant/service-accounts/{serviceAccountId}/api-keys:
+    get:
+      tags: [ServiceAccount]
+      operationId: listTenantApiKeys
+      summary: 租户服务账号 API Key 列表
+      x-permission: tenant.service_account.read
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/ServiceAccountId'
+      responses:
+        '200':
+          description: keys
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [ServiceAccount]
+      operationId: createTenantApiKey
+      summary: 创建租户 API Key（明文只返回一次）
+      x-permission: tenant.service_account.manage
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/ServiceAccountId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiKeyCreate'
+      responses:
+        '201':
+          description: created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyCreated'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/tenant/service-accounts/{serviceAccountId}/api-keys/{keyId}:
+    delete:
+      tags: [ServiceAccount]
+      operationId: revokeTenantApiKey
+      summary: 撤销租户 API Key
+      x-permission: tenant.service_account.manage
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/ServiceAccountId'
+        - $ref: '#/components/parameters/ApiKeyId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204': { description: revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/tenant/webhooks:
+    get:
+      tags: [Webhook]
+      operationId: listTenantWebhooks
+      summary: 租户 Webhook 列表
+      x-permission: tenant.webhook.read
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: webhooks
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookEndpointList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Webhook]
+      operationId: createTenantWebhook
+      summary: 创建 Webhook
+      x-permission: tenant.webhook.manage
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookEndpointCreate'
+      responses:
+        '201':
+          description: created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookEndpointCreated'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/tenant/webhooks/{webhookId}:
+    get:
+      tags: [Webhook]
+      operationId: getTenantWebhook
+      summary: Webhook 详情
+      x-permission: tenant.webhook.read
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/WebhookId'
+      responses:
+        '200':
+          description: webhook
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookEndpoint'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Webhook]
+      operationId: updateTenantWebhook
+      summary: 更新 Webhook
+      x-permission: tenant.webhook.manage
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/WebhookId'
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookEndpointUpdate'
+      responses:
+        '200':
+          description: updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookEndpoint'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      tags: [Webhook]
+      operationId: deleteTenantWebhook
+      summary: 删除/停用 Webhook
+      x-permission: tenant.webhook.manage
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/WebhookId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204': { description: disabled }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/tenant/events:
+    get:
+      tags: [Webhook]
+      operationId: listTenantEvents
+      summary: 查看租户事件投递状态
+      x-permission: tenant.event.read
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [PENDING, DISPATCHED, FAILED, DEAD]
+      responses:
+        '200':
+          description: events
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OutboxEventList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/organizations/{organizationId}:
+    get:
+      tags: [Organization]
+      operationId: getOrganization
+      summary: 组织详情
+      x-permission: organization.read
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/OrganizationId'
+      responses:
+        '200':
+          description: organization
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Organization'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Organization]
+      operationId: updateOrganization
+      summary: 更新组织
+      x-permission: organization.update
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/OrganizationId'
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrganizationUpdate'
+      responses:
+        '200':
+          description: updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Organization'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+  /api/v1/organizations/{organizationId}/freeze:
+    post:
+      tags: [Organization]
+      operationId: freezeOrganization
+      summary: 冻结组织
+      x-permission: tenant.organization.freeze
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/OrganizationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: frozen
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Organization'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/organizations/{organizationId}/unfreeze:
+    post:
+      tags: [Organization]
+      operationId: unfreezeOrganization
+      summary: 解冻组织
+      x-permission: tenant.organization.freeze
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/OrganizationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: active
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Organization'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/organizations/{organizationId}/archive:
+    post:
+      tags: [Organization]
+      operationId: archiveOrganization
+      summary: 归档组织（ACTIVE/FROZEN → ARCHIVED，终态）
+      x-permission: tenant.organization.freeze
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/OrganizationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: archived
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Organization'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+  /api/v1/organizations/{organizationId}/members:
+    get:
+      tags: [Organization]
+      operationId: listOrganizationMembers
+      summary: 组织成员列表
+      x-permission: organization.member.read
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/OrganizationId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: members
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrganizationMembershipList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Organization]
+      operationId: inviteOrganizationMember
+      summary: 邀请组织成员
+      x-permission: organization.member.invite
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/OrganizationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrganizationMemberInvite'
+      responses:
+        '201':
+          description: invited
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrganizationMembership'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/organizations/{organizationId}/members/{membershipId}:
+    delete:
+      tags: [Organization]
+      operationId: removeOrganizationMember
+      summary: 移除组织成员
+      x-permission: organization.member.remove
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/OrganizationId'
+        - $ref: '#/components/parameters/OrganizationMembershipId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204': { description: removed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/organizations/{organizationId}/members/{membershipId}/roles:
+    put:
+      tags: [Organization]
+      operationId: setOrganizationMemberRoles
+      summary: 设置组织成员角色
+      x-permission: organization.role.assign
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/OrganizationId'
+        - $ref: '#/components/parameters/OrganizationMembershipId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoleAssignmentUpdate'
+      responses:
+        '200':
+          description: updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrganizationMembership'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/organizations/{organizationId}/roles:
+    get:
+      tags: [Organization]
+      operationId: listOrganizationRoles
+      summary: 组织角色列表
+      x-permission: organization.role.read
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/OrganizationId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: roles
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoleList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Organization]
+      operationId: createOrganizationRole
+      summary: 创建组织角色
+      x-permission: organization.role.manage
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/OrganizationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoleCreate'
+      responses:
+        '201':
+          description: created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Role'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/organizations/{organizationId}/roles/{roleId}/permissions:
+    put:
+      tags: [Organization]
+      operationId: setOrganizationRolePermissions
+      summary: 设置组织角色权限
+      x-permission: organization.role.manage
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/OrganizationId'
+        - $ref: '#/components/parameters/RoleId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RolePermissionsUpdate'
+      responses:
+        '200':
+          description: updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Role'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/organizations/{organizationId}/transfer:
+    post:
+      tags: [Organization]
+      operationId: requestOrganizationTransfer
+      summary: 发起组织所有权转让
+      x-permission: organization.transfer
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/OrganizationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OwnershipTransferCreate'
+      responses:
+        '201':
+          description: requested
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OwnershipTransfer'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/ownership-transfers/{transferId}/accept:
+    post:
+      tags: [Organization]
+      operationId: acceptOwnershipTransfer
+      x-subject-authz: transfer-target
+      summary: 接受所有权转让
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TransferId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OwnershipTransfer'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/ownership-transfers/{transferId}/decline:
+    post:
+      tags: [Organization]
+      operationId: declineOwnershipTransfer
+      x-subject-authz: transfer-target
+      summary: 拒绝所有权转让
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TransferId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: declined
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OwnershipTransfer'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/ownership-transfers/{transferId}/cancel:
+    post:
+      tags: [Organization]
+      operationId: cancelOwnershipTransfer
+      x-subject-authz: transfer-requester
+      summary: 取消所有权转让
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TransferId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OwnershipTransfer'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/platform/v1/tenants:
+    get:
+      tags: [Platform]
+      operationId: platformListTenants
+      summary: 平台租户列表
+      x-permission: platform.tenant.read
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [PROVISIONING, ACTIVE, FROZEN, CLOSED]
+      responses:
+        '200':
+          description: tenants
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Platform]
+      operationId: platformCreateTenant
+      summary: 创建租户
+      x-permission: platform.tenant.create
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TenantCreate'
+      responses:
+        '201':
+          description: created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/platform/v1/tenants/{tenantId}:
+    get:
+      tags: [Platform]
+      operationId: platformGetTenant
+      summary: 租户详情
+      x-permission: platform.tenant.read
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      responses:
+        '200':
+          description: tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Platform]
+      operationId: platformUpdateTenant
+      summary: 更新租户
+      x-permission: platform.tenant.update
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TenantUpdate'
+      responses:
+        '200':
+          description: updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/platform/v1/tenants/{tenantId}/freeze:
+    post:
+      tags: [Platform]
+      operationId: platformFreezeTenant
+      summary: 冻结租户
+      x-permission: platform.tenant.freeze
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: frozen
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/platform/v1/tenants/{tenantId}/unfreeze:
+    post:
+      tags: [Platform]
+      operationId: platformUnfreezeTenant
+      summary: 解冻租户
+      x-permission: platform.tenant.freeze
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: active
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/platform/v1/tenants/{tenantId}/close:
+    post:
+      tags: [Platform]
+      operationId: platformCloseTenant
+      summary: 关闭租户
+      x-permission: platform.tenant.close
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: closed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/platform/v1/tenants/{tenantId}/members:
+    get:
+      tags: [Platform]
+      operationId: platformListTenantMembers
+      summary: 查看指定租户成员
+      x-permission: platform.tenant.member.read
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: members
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MembershipList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/platform/v1/tenants/{tenantId}/organizations:
+    get:
+      tags: [Platform]
+      operationId: platformListTenantOrganizations
+      summary: 查看指定租户组织
+      x-permission: platform.tenant.organization.read
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: organizations
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrganizationList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/platform/v1/users:
+    get:
+      tags: [Platform]
+      operationId: platformListUsers
+      summary: 平台用户列表
+      x-permission: platform.user.read
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [PENDING_VERIFICATION, ACTIVE, LOCKED, DISABLED]
+      responses:
+        '200':
+          description: users
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/platform/v1/users/{userId}:
+    get:
+      tags: [Platform]
+      operationId: platformGetUser
+      summary: 平台用户详情
+      x-permission: platform.user.read
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      responses:
+        '200':
+          description: user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/platform/v1/users/{userId}/disable:
+    post:
+      tags: [Platform]
+      operationId: platformDisableUser
+      summary: 禁用用户
+      x-permission: platform.user.disable
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: disabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/platform/v1/users/{userId}/enable:
+    post:
+      tags: [Platform]
+      operationId: platformEnableUser
+      summary: 启用用户
+      x-permission: platform.user.enable
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: enabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/platform/v1/users/{userId}/sessions:
+    delete:
+      tags: [Platform]
+      operationId: platformRevokeUserSessions
+      summary: 撤销用户全部会话
+      x-permission: platform.user.session.revoke
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204': { description: revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/platform/v1/users/{userId}/role-grants:
+    get:
+      tags: [Platform]
+      operationId: platformListUserRoleGrants
+      summary: 用户平台角色授予
+      x-permission: platform.role.read
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      responses:
+        '200':
+          description: grants
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoleGrantList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Platform]
+      operationId: platformGrantUserRole
+      summary: 授予平台角色
+      x-permission: platform.role.grant
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoleGrantCreate'
+      responses:
+        '201':
+          description: granted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoleGrant'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/platform/v1/users/{userId}/role-grants/{grantId}:
+    delete:
+      tags: [Platform]
+      operationId: platformRevokeUserRole
+      summary: 撤销平台角色授予
+      x-permission: platform.role.grant
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+        - $ref: '#/components/parameters/GrantId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204': { description: revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/platform/v1/roles:
+    get:
+      tags: [Platform]
+      operationId: platformListRoles
+      summary: 平台角色列表
+      x-permission: platform.role.read
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: roles
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoleList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Platform]
+      operationId: platformCreateRole
+      summary: 创建平台角色
+      x-permission: platform.role.manage
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoleCreate'
+      responses:
+        '201':
+          description: created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Role'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/platform/v1/roles/{roleId}/permissions:
+    put:
+      tags: [Platform]
+      operationId: platformSetRolePermissions
+      summary: 设置平台角色权限
+      x-permission: platform.role.manage
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/RoleId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RolePermissionsUpdate'
+      responses:
+        '200':
+          description: updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Role'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/platform/v1/params:
+    get:
+      tags: [Platform]
+      operationId: platformListParams
+      summary: 平台参数列表
+      x-permission: platform.param.read
+      responses:
+        '200':
+          description: params
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformParamList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/platform/v1/params/{key}:
+    get:
+      tags: [Platform]
+      operationId: platformGetParam
+      summary: 平台参数详情
+      x-permission: platform.param.read
+      parameters:
+        - $ref: '#/components/parameters/ParamKey'
+      responses:
+        '200':
+          description: param
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformParam'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Platform]
+      operationId: platformUpdateParam
+      summary: 更新平台参数
+      x-permission: platform.param.manage
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/ParamKey'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlatformParamUpdate'
+      responses:
+        '200':
+          description: updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformParam'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/platform/v1/extensions:
+    get:
+      tags: [Platform]
+      operationId: platformListExtensions
+      summary: 扩展注册表
+      x-permission: platform.extension.read
+      responses:
+        '200':
+          description: extensions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExtensionList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/platform/v1/extensions/{name}/enable:
+    post:
+      tags: [Platform]
+      operationId: platformEnableExtension
+      summary: 启用扩展
+      x-permission: platform.extension.manage
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/ExtensionName'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: enabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Extension'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/platform/v1/extensions/{name}/disable:
+    post:
+      tags: [Platform]
+      operationId: platformDisableExtension
+      summary: 禁用扩展
+      x-permission: platform.extension.manage
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/ExtensionName'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: disabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Extension'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/platform/v1/service-accounts:
+    get:
+      tags: [ServiceAccount]
+      operationId: platformListServiceAccounts
+      summary: 平台级服务账号列表
+      x-permission: platform.service_account.read
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: service accounts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceAccountList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [ServiceAccount]
+      operationId: platformCreateServiceAccount
+      summary: 创建平台级服务账号
+      x-permission: platform.service_account.manage
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceAccountCreate'
+      responses:
+        '201':
+          description: created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceAccountCreated'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/platform/v1/audit:
+    get:
+      tags: [Platform]
+      operationId: platformListAudit
+      summary: 平台审计查询
+      x-permission: platform.audit.read
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: tenant_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: action
+          in: query
+          schema:
+            type: string
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: audit events
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditEventList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/platform/v1/audit/export:
+    post:
+      tags: [Platform]
+      operationId: platformExportAudit
+      summary: 导出平台审计
+      x-permission: platform.audit.export
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuditExportRequest'
+      responses:
+        '202':
+          description: accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditExport'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /api/platform/v1/events:
+    get:
+      tags: [Platform]
+      operationId: platformListEvents
+      summary: 平台事件投递状态
+      x-permission: platform.event.read
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [PENDING, DISPATCHED, FAILED, DEAD]
+      responses:
+        '200':
+          description: events
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OutboxEventList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /oauth/token:
+    post:
+      tags: [Auth]
+      operationId: clientCredentialsToken
+      summary: 服务账号 Client Credentials
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [grant_type, client_id, client_secret]
+              properties:
+                grant_type:
+                  type: string
+                  const: client_credentials
+                client_id:
+                  type: string
+                client_secret:
+                  type: string
+                scope:
+                  type: string
+                  description: 空格分隔的 scope
+      responses:
+        '200':
+          description: issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceTokenResponse'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /api/v1/invitations/accept:
+    post:
+      tags: [Tenant]
+      operationId: acceptInvitation
+      x-subject-authz: invitee
+      summary: 接受租户/组织邀请
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AcceptInvitationRequest'
+      responses:
+        '200':
+          description: accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Membership'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/tenant/invitations:
+    get:
+      tags: [Tenant]
+      operationId: listTenantInvitations
+      summary: 租户邀请列表
+      x-permission: tenant.member.read
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [PENDING, ACCEPTED, REVOKED, EXPIRED]
+      responses:
+        '200':
+          description: invitations
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvitationList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/tenant/invitations/{invitationId}:
+    delete:
+      tags: [Tenant]
+      operationId: revokeTenantInvitation
+      summary: 撤销租户邀请
+      x-permission: tenant.member.invite
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/InvitationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204': { description: revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/tenant/transfer:
+    post:
+      tags: [Tenant]
+      operationId: requestTenantTransfer
+      summary: 发起租户所有权转让
+      x-permission: tenant.transfer
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OwnershipTransferCreate'
+      responses:
+        '201':
+          description: requested
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OwnershipTransfer'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/tenant/organizations/{organizationId}/withdraw:
+    post:
+      tags: [Tenant]
+      operationId: withdrawOrganization
+      summary: 撤回待审批组织
+      x-permission: tenant.organization.create
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/OrganizationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: withdrawn
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Organization'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/organizations/{organizationId}/members/{membershipId}/suspend:
+    post:
+      tags: [Organization]
+      operationId: suspendOrganizationMember
+      summary: 暂停组织成员
+      x-permission: organization.member.suspend
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/OrganizationId'
+        - $ref: '#/components/parameters/OrganizationMembershipId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: suspended
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrganizationMembership'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/organizations/{organizationId}/members/{membershipId}/activate:
+    post:
+      tags: [Organization]
+      operationId: activateOrganizationMember
+      summary: 恢复组织成员
+      x-permission: organization.member.activate
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/OrganizationId'
+        - $ref: '#/components/parameters/OrganizationMembershipId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: activated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrganizationMembership'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/tenant/webhooks/{webhookId}/deliveries:
+    get:
+      tags: [Webhook]
+      operationId: listWebhookDeliveries
+      summary: Webhook 投递记录
+      x-permission: tenant.event.read
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/WebhookId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [PENDING, DELIVERED, FAILED, DEAD]
+      responses:
+        '200':
+          description: deliveries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookDeliveryList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/tenant/webhooks/{webhookId}/deliveries/{deliveryId}/redeliver:
+    post:
+      tags: [Webhook]
+      operationId: redeliverWebhook
+      summary: 重新投递 Webhook
+      x-permission: tenant.webhook.manage
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/WebhookId'
+        - $ref: '#/components/parameters/DeliveryId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: scheduled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookDelivery'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/tenant/audit/exports/{exportId}:
+    get:
+      tags: [Tenant]
+      operationId: getTenantAuditExport
+      summary: 查询租户审计导出状态
+      x-permission: tenant.audit.read
+      parameters:
+        - $ref: '#/components/parameters/TenantHeader'
+        - $ref: '#/components/parameters/ExportId'
+      responses:
+        '200':
+          description: export
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditExport'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/platform/v1/roles/{roleId}:
+    get:
+      tags: [Platform]
+      operationId: platformGetRole
+      summary: 平台角色详情
+      x-permission: platform.role.read
+      parameters:
+        - $ref: '#/components/parameters/RoleId'
+      responses:
+        '200':
+          description: role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Role'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Platform]
+      operationId: platformUpdateRole
+      summary: 更新平台角色
+      x-permission: platform.role.manage
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/RoleId'
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoleUpdate'
+      responses:
+        '200':
+          description: updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Role'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/platform/v1/extensions/{name}:
+    get:
+      tags: [Platform]
+      operationId: platformGetExtension
+      summary: 扩展详情
+      x-permission: platform.extension.read
+      parameters:
+        - $ref: '#/components/parameters/ExtensionName'
+      responses:
+        '200':
+          description: extension
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Extension'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/platform/v1/service-accounts/{serviceAccountId}:
+    get:
+      tags: [ServiceAccount]
+      operationId: platformGetServiceAccount
+      summary: 平台服务账号详情
+      x-permission: platform.service_account.read
+      parameters:
+        - $ref: '#/components/parameters/ServiceAccountId'
+      responses:
+        '200':
+          description: service account
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceAccount'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [ServiceAccount]
+      operationId: platformUpdateServiceAccount
+      summary: 更新平台服务账号
+      x-permission: platform.service_account.manage
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/ServiceAccountId'
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceAccountUpdate'
+      responses:
+        '200':
+          description: updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceAccount'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/platform/v1/service-accounts/{serviceAccountId}/api-keys:
+    get:
+      tags: [ServiceAccount]
+      operationId: platformListApiKeys
+      summary: 平台服务账号 API Key 列表
+      x-permission: platform.service_account.read
+      parameters:
+        - $ref: '#/components/parameters/ServiceAccountId'
+      responses:
+        '200':
+          description: keys
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [ServiceAccount]
+      operationId: platformCreateApiKey
+      summary: 创建平台服务账号 API Key
+      x-permission: platform.service_account.manage
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/ServiceAccountId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiKeyCreate'
+      responses:
+        '201':
+          description: created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyCreated'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/platform/v1/service-accounts/{serviceAccountId}/api-keys/{keyId}:
+    delete:
+      tags: [ServiceAccount]
+      operationId: platformRevokeApiKey
+      summary: 撤销平台服务账号 API Key
+      x-permission: platform.service_account.manage
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/ServiceAccountId'
+        - $ref: '#/components/parameters/ApiKeyId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204': { description: revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/platform/v1/audit/exports/{exportId}:
+    get:
+      tags: [Platform]
+      operationId: platformGetAuditExport
+      summary: 查询平台审计导出状态
+      x-permission: platform.audit.read
+      parameters:
+        - $ref: '#/components/parameters/ExportId'
+      responses:
+        '200':
+          description: export
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditExport'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: RS256 JWT，支持 user / platform / service audience
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: 服务账号 API Key
+
+  parameters:
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+        maxLength: 512
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    TenantHeader:
+      name: X-Tenant-Id
+      in: header
+      required: false
+      schema:
+        type: string
+        format: uuid
+      description: 租户作用域提示，必须与 Token/授权范围一致
+    OrganizationHeader:
+      name: X-Organization-Id
+      in: header
+      required: false
+      schema:
+        type: string
+        format: uuid
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+    IfMatch:
+      name: If-Match
+      in: header
+      required: false
+      schema:
+        type: string
+      description: 乐观锁 ETag
+    CurrentSessionId:
+      name: current_session_id
+      in: query
+      required: false
+      schema:
+        type: string
+        format: uuid
+    SessionId:
+      name: sessionId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    MembershipId:
+      name: membershipId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    OrganizationMembershipId:
+      name: membershipId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    OrganizationId:
+      name: organizationId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    RoleId:
+      name: roleId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    TenantId:
+      name: tenantId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    UserId:
+      name: userId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ServiceAccountId:
+      name: serviceAccountId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ApiKeyId:
+      name: keyId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    WebhookId:
+      name: webhookId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    TransferId:
+      name: transferId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    GrantId:
+      name: grantId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    InvitationId:
+      name: invitationId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    DeliveryId:
+      name: deliveryId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ExportId:
+      name: exportId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ParamKey:
+      name: key
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[a-z][a-z0-9_.-]{0,127}$'
+    ExtensionName:
+      name: name
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[a-z][a-z0-9-]{0,63}$'
+
+  responses:
+    BadRequest:
+      description: invalid request
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Unauthorized:
+      description: authentication required or token stale
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Forbidden:
+      description: permission denied
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    NotFound:
+      description: not found or not visible
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Conflict:
+      description: state or uniqueness conflict
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    PreconditionFailed:
+      description: optimistic lock mismatch
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    RateLimited:
+      description: rate limited
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    ServerError:
+      description: internal error
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+  schemas:
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded, down]
+        version:
+          type: string
+        checks:
+          type: object
+          additionalProperties:
+            type: string
+
+    Problem:
+      type: object
+      required: [type, title, status, code]
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        code:
+          type: string
+          enum:
+            - UNAUTHENTICATED
+            - INVALID_CREDENTIALS
+            - ACCOUNT_LOCKED
+            - PERMISSION_VERSION_STALE
+            - CONTACT_NOT_VERIFIED
+            - STEP_UP_REQUIRED
+            - API_KEY_INVALID
+            - OAUTH_INVALID_CLIENT
+            - PERMISSION_DENIED
+            - TENANT_CONTEXT_REQUIRED
+            - NO_ACTIVE_MEMBERSHIP
+            - TENANT_FROZEN
+            - TENANT_CLOSED
+            - ORGANIZATION_FROZEN
+            - ORGANIZATION_ARCHIVED
+            - PERMISSION_ESCALATION_DENIED
+            - RESOURCE_NOT_FOUND
+            - VALIDATION_FAILED
+            - IDEMPOTENCY_CONFLICT
+            - IDEMPOTENCY_IN_PROGRESS
+            - IDEMPOTENCY_FAILED
+            - VERSION_CONFLICT
+            - CONCURRENT_MODIFICATION
+            - PRECONDITION_FAILED
+            - STATE_CONFLICT
+            - OWNER_TRANSFER_PENDING
+            - OWNER_EXISTS
+            - OWNER_NOT_REMOVABLE
+            - ORGANIZATION_DEPTH_EXCEEDED
+            - TENANT_SLUG_EXISTS
+            - MEMBERSHIP_EXISTS
+            - ORGANIZATION_NAME_EXISTS
+            - PENDING_REQUEST_EXISTS
+            - NOT_SUPPORTED
+            - INVITATION_INVALID
+            - INVITATION_EXPIRED
+            - ONE_TIME_TOKEN_INVALID
+            - ONE_TIME_TOKEN_EXPIRED
+            - RATE_LIMITED
+            - SERVICE_UNAVAILABLE
+            - INTERNAL_ERROR
+          description: 稳定错误码；以 docs/20-design/error-codes-v2.0.md §3 为唯一权威清单，新增/废弃需先改目录（`errors[].code` 为字段级子码，不在此枚举内）
+        detail:
+          type: string
+        instance:
+          type: string
+        request_id:
+          type: string
+        trace_id:
+          type: string
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              code:
+                type: string
+              message:
+                type: string
+
+    PermissionVersion:
+      type: object
+      properties:
+        u:
+          type: integer
+          minimum: 0
+        t:
+          type: integer
+          minimum: 0
+        m:
+          type: integer
+          minimum: 0
+        o:
+          type: integer
+          minimum: 0
+        om:
+          type: integer
+          minimum: 0
+
+    Pagination:
+      type: object
+      properties:
+        next_cursor:
+          type: [string, 'null']
+        has_more:
+          type: boolean
+
+    Tenant:
+      type: object
+      required: [id, slug, name, status, permission_version, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        slug:
+          type: string
+        name:
+          type: string
+        status:
+          type: string
+          enum: [PROVISIONING, ACTIVE, FROZEN, CLOSED]
+        owner_user_id:
+          type: [string, 'null']
+          format: uuid
+        permission_version:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    TenantCreate:
+      type: object
+      required: [slug, name, owner_user_id]
+      properties:
+        slug:
+          type: string
+          pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+        name:
+          type: string
+          maxLength: 128
+        owner_user_id:
+          type: string
+          format: uuid
+
+    TenantUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+          maxLength: 128
+
+    TenantList:
+      allOf:
+        - $ref: '#/components/schemas/Pagination'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/Tenant'
+
+    TenantConfig:
+      type: object
+      additionalProperties: true
+
+    User:
+      type: object
+      required: [id, account, display_name, status, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        account:
+          type: string
+        display_name:
+          type: string
+        email:
+          type: [string, 'null']
+        phone:
+          type: [string, 'null']
+        status:
+          type: string
+          enum: [PENDING_VERIFICATION, ACTIVE, LOCKED, DISABLED]
+        email_verified:
+          type: boolean
+        phone_verified:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    UserList:
+      allOf:
+        - $ref: '#/components/schemas/Pagination'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/User'
+
+    Me:
+      allOf:
+        - $ref: '#/components/schemas/User'
+        - type: object
+          properties:
+            current_tenant_id:
+              type: [string, 'null']
+              format: uuid
+            current_organization_id:
+              type: [string, 'null']
+              format: uuid
+            permission_version:
+              $ref: '#/components/schemas/PermissionVersion'
+
+    MeUpdate:
+      type: object
+      properties:
+        display_name:
+          type: string
+          maxLength: 128
+
+    RegisterRequest:
+      type: object
+      required: [account, password, display_name]
+      properties:
+        account:
+          type: string
+          minLength: 3
+          maxLength: 320
+        password:
+          type: string
+          minLength: 12
+          maxLength: 128
+        display_name:
+          type: string
+          maxLength: 128
+        email:
+          type: string
+          format: email
+        phone:
+          type: string
+          maxLength: 32
+
+    LoginRequest:
+      type: object
+      required: [account, password]
+      properties:
+        account:
+          type: string
+        password:
+          type: string
+        audience:
+          type: string
+          enum: [user, platform]
+          default: user
+        tenant_id:
+          type: string
+          format: uuid
+        organization_id:
+          type: string
+          format: uuid
+
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+
+    LogoutRequest:
+      type: object
+      properties:
+        refresh_token:
+          type: string
+        all_sessions:
+          type: boolean
+          default: false
+
+    AuthTokens:
+      type: object
+      required: [access_token, token_type, expires_in, refresh_token]
+      properties:
+        access_token:
+          type: string
+        token_type:
+          type: string
+          const: Bearer
+        expires_in:
+          type: integer
+        refresh_token:
+          type: string
+        refresh_expires_in:
+          type: integer
+
+    PasswordForgotRequest:
+      type: object
+      required: [account]
+      properties:
+        account:
+          type: string
+
+    PasswordResetRequest:
+      type: object
+      required: [token, new_password]
+      properties:
+        token:
+          type: string
+        new_password:
+          type: string
+          minLength: 12
+          maxLength: 128
+
+    VerifyRequest:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+
+    ChangePasswordRequest:
+      type: object
+      required: [current_password, new_password]
+      properties:
+        current_password:
+          type: string
+        new_password:
+          type: string
+          minLength: 12
+          maxLength: 128
+
+    ContextSwitchRequest:
+      type: object
+      required: [tenant_id]
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        organization_id:
+          type: [string, 'null']
+          format: uuid
+
+    ContextSwitchResponse:
+      type: object
+      required: [access_token, token_type, expires_in, tenant_id]
+      properties:
+        access_token:
+          type: string
+        token_type:
+          type: string
+          const: Bearer
+        expires_in:
+          type: integer
+        tenant_id:
+          type: string
+          format: uuid
+        organization_id:
+          type: [string, 'null']
+          format: uuid
+        permission_version:
+          $ref: '#/components/schemas/PermissionVersion'
+
+    Session:
+      type: object
+      required: [id, audience, status, created_at, expires_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        audience:
+          type: string
+          enum: [user, platform]
+        tenant_id:
+          type: [string, 'null']
+          format: uuid
+        organization_id:
+          type: [string, 'null']
+          format: uuid
+        status:
+          type: string
+          enum: [ACTIVE, ROTATED, REVOKED, EXPIRED]
+        user_agent:
+          type: string
+        client_ip:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: [string, 'null']
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+
+    SessionList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Session'
+
+    PermissionSet:
+      type: object
+      required: [permissions, generated_at]
+      properties:
+        tenant_id:
+          type: [string, 'null']
+          format: uuid
+        organization_id:
+          type: [string, 'null']
+          format: uuid
+        permissions:
+          type: array
+          items:
+            type: string
+        permission_version:
+          $ref: '#/components/schemas/PermissionVersion'
+        generated_at:
+          type: string
+          format: date-time
+
+    MembershipStatus:
+      type: string
+      enum: [INVITED, ACTIVE, SUSPENDED, INACTIVE]
+
+    RoleRef:
+      type: object
+      required: [id, code, name, scope]
+      properties:
+        id:
+          type: string
+          format: uuid
+        code:
+          type: string
+        name:
+          type: string
+        scope:
+          type: string
+          enum: [PLATFORM, TENANT, ORGANIZATION]
+        is_owner_role:
+          type: boolean
+
+    Membership:
+      type: object
+      required: [id, tenant_id, user_id, status, is_owner, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        user:
+          $ref: '#/components/schemas/User'
+        status:
+          $ref: '#/components/schemas/MembershipStatus'
+        is_owner:
+          type: boolean
+        permission_version:
+          type: integer
+        roles:
+          type: array
+          items:
+            $ref: '#/components/schemas/RoleRef'
+        joined_at:
+          type: [string, 'null']
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    MembershipList:
+      allOf:
+        - $ref: '#/components/schemas/Pagination'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/Membership'
+
+    MyMembership:
+      type: object
+      required: [tenant_id, status]
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        tenant_name:
+          type: string
+        organization_id:
+          type: [string, 'null']
+          format: uuid
+        organization_name:
+          type: [string, 'null']
+        status:
+          $ref: '#/components/schemas/MembershipStatus'
+        is_owner:
+          type: boolean
+        roles:
+          type: array
+          items:
+            $ref: '#/components/schemas/RoleRef'
+
+    MyMembershipList:
+      allOf:
+        - $ref: '#/components/schemas/Pagination'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/MyMembership'
+
+    InvitationCreate:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+        organization_id:
+          type: [string, 'null']
+          format: uuid
+        role_id:
+          type: [string, 'null']
+          format: uuid
+
+    Invitation:
+      type: object
+      required: [id, tenant_id, email, status, expires_at, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        organization_id:
+          type: [string, 'null']
+          format: uuid
+        email:
+          type: string
+        role_id:
+          type: [string, 'null']
+          format: uuid
+        status:
+          type: string
+          enum: [PENDING, ACCEPTED, REVOKED, EXPIRED]
+        expires_at:
+          type: string
+          format: date-time
+        accepted_at:
+          type: [string, 'null']
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    Permission:
+      type: object
+      required: [code, scope, description, status]
+      properties:
+        code:
+          type: string
+        namespace:
+          type: string
+          enum: [CORE, EXT]
+        module:
+          type: [string, 'null']
+        scope:
+          type: string
+          enum: [PLATFORM, TENANT, ORGANIZATION]
+        description:
+          type: string
+        is_dangerous:
+          type: boolean
+        status:
+          type: string
+          enum: [ACTIVE, DEPRECATED]
+
+    Role:
+      type: object
+      required: [id, scope, code, name, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        scope:
+          type: string
+          enum: [PLATFORM, TENANT, ORGANIZATION]
+        tenant_id:
+          type: [string, 'null']
+          format: uuid
+        organization_id:
+          type: [string, 'null']
+          format: uuid
+        code:
+          type: string
+        name:
+          type: string
+        description:
+          type: [string, 'null']
+        is_system:
+          type: boolean
+        is_owner_role:
+          type: boolean
+        status:
+          type: string
+          enum: [ACTIVE, DISABLED]
+        permission_codes:
+          type: array
+          items:
+            type: string
+
+    RoleCreate:
+      type: object
+      required: [code, name, permission_codes]
+      properties:
+        code:
+          type: string
+          pattern: '^[a-z][a-z0-9_-]{1,63}$'
+        name:
+          type: string
+          maxLength: 128
+        description:
+          type: string
+        permission_codes:
+          type: array
+          items:
+            type: string
+
+    RoleUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+          maxLength: 128
+        description:
+          type: string
+        status:
+          type: string
+          enum: [ACTIVE, DISABLED]
+
+    RolePermissionsUpdate:
+      type: object
+      required: [permission_codes]
+      properties:
+        permission_codes:
+          type: array
+          items:
+            type: string
+
+    RoleAssignmentUpdate:
+      type: object
+      required: [role_ids]
+      properties:
+        role_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+
+    RoleList:
+      allOf:
+        - $ref: '#/components/schemas/Pagination'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/Role'
+
+    PermissionList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Permission'
+
+    Organization:
+      type: object
+      required: [id, tenant_id, org_type, name, status, visibility, permission_version, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        parent_id:
+          type: [string, 'null']
+          format: uuid
+        org_type:
+          type: string
+        name:
+          type: string
+        status:
+          type: string
+          enum: [PENDING, ACTIVE, REJECTED, WITHDRAWN, FROZEN, ARCHIVED]
+        visibility:
+          type: string
+          enum: [TENANT, SUBTREE, PRIVATE]
+        owner_user_id:
+          type: [string, 'null']
+          format: uuid
+        permission_version:
+          type: integer
+        depth:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    OrganizationCreate:
+      type: object
+      required: [org_type, name]
+      properties:
+        parent_id:
+          type: [string, 'null']
+          format: uuid
+        org_type:
+          type: string
+          pattern: '^[a-z][a-z0-9_-]{0,63}$'
+        name:
+          type: string
+          maxLength: 128
+        visibility:
+          type: string
+          enum: [TENANT, SUBTREE, PRIVATE]
+          default: TENANT
+
+    OrganizationUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+          maxLength: 128
+        visibility:
+          type: string
+          enum: [TENANT, SUBTREE, PRIVATE]
+
+    OrganizationList:
+      allOf:
+        - $ref: '#/components/schemas/Pagination'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/Organization'
+
+    ApprovalDecision:
+      type: object
+      required: [approve]
+      properties:
+        approve:
+          type: boolean
+        reason:
+          type: string
+
+    OrganizationMembership:
+      type: object
+      required: [id, tenant_id, organization_id, user_id, status, is_owner, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        organization_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        user:
+          $ref: '#/components/schemas/User'
+        status:
+          $ref: '#/components/schemas/MembershipStatus'
+        is_owner:
+          type: boolean
+        permission_version:
+          type: integer
+        roles:
+          type: array
+          items:
+            $ref: '#/components/schemas/RoleRef'
+        joined_at:
+          type: [string, 'null']
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    OrganizationMemberInvite:
+      type: object
+      required: [user_id]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        role_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+
+    OrganizationMembershipList:
+      allOf:
+        - $ref: '#/components/schemas/Pagination'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/OrganizationMembership'
+
+    OwnershipTransferCreate:
+      type: object
+      required: [to_user_id]
+      properties:
+        to_user_id:
+          type: string
+          format: uuid
+        reason:
+          type: string
+
+    OwnershipTransfer:
+      type: object
+      required: [id, tenant_id, scope, target_id, from_user_id, to_user_id, status, expires_at, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        scope:
+          type: string
+          enum: [TENANT, ORGANIZATION]
+        target_id:
+          type: string
+          format: uuid
+        from_user_id:
+          type: string
+          format: uuid
+        to_user_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [PENDING, ACCEPTED, DECLINED, CANCELLED, EXPIRED, FORCED]
+        forced:
+          type: boolean
+        reason:
+          type: [string, 'null']
+        expires_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: [string, 'null']
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    ServiceAccount:
+      type: object
+      required: [id, name, client_id, status, scopes, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: [string, 'null']
+          format: uuid
+        name:
+          type: string
+        client_id:
+          type: string
+        status:
+          type: string
+          enum: [ACTIVE, DISABLED]
+        scopes:
+          type: array
+          items:
+            type: string
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ServiceAccountCreated:
+      allOf:
+        - $ref: '#/components/schemas/ServiceAccount'
+        - type: object
+          required: [client_secret]
+          properties:
+            client_secret:
+              type: string
+              description: 只在创建时返回一次
+
+    ServiceAccountCreate:
+      type: object
+      required: [name, scopes]
+      properties:
+        name:
+          type: string
+          maxLength: 128
+        scopes:
+          type: array
+          items:
+            type: string
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+
+    ServiceAccountUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+          maxLength: 128
+        status:
+          type: string
+          enum: [ACTIVE, DISABLED]
+        scopes:
+          type: array
+          items:
+            type: string
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+
+    ServiceAccountList:
+      allOf:
+        - $ref: '#/components/schemas/Pagination'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/ServiceAccount'
+
+    ApiKey:
+      type: object
+      required: [id, service_account_id, key_prefix, status, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        service_account_id:
+          type: string
+          format: uuid
+        name:
+          type: [string, 'null']
+        key_prefix:
+          type: string
+        status:
+          type: string
+          enum: [ACTIVE, REVOKED, EXPIRED]
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+        last_used_at:
+          type: [string, 'null']
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type: [string, 'null']
+          format: date-time
+
+    ApiKeyCreated:
+      allOf:
+        - $ref: '#/components/schemas/ApiKey'
+        - type: object
+          required: [key]
+          properties:
+            key:
+              type: string
+              description: 只在创建时返回一次
+
+    ApiKeyCreate:
+      type: object
+      properties:
+        name:
+          type: string
+          maxLength: 128
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+
+    ApiKeyList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApiKey'
+
+    WebhookEventType:
+      type: string
+      maxLength: 128
+      pattern: '^(?:tenant\.(?:\*|created|frozen|unfrozen|closed|membership\.(?:created|removed))|organization\.(?:\*|created|frozen|unfrozen|archived)|ownership\.(?:\*|transfer\.(?:requested|accepted|forced))|extension\.(?:\*|enabled|disabled)|ext\.[a-z0-9_]+(?:\.\*|(?:\.[a-z0-9_]+){2,3}))$'
+      description: 事件编码或顶层订阅前缀（如 tenant.*）；允许值以 docs/20-design/event-catalog-v2.0.md §4/§6 为唯一清单，中段通配与审计编码在创建/更新时拒绝
+
+    WebhookEndpoint:
+      type: object
+      required: [id, tenant_id, url, events, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/WebhookEventType'
+        status:
+          type: string
+          enum: [ACTIVE, DISABLED]
+        description:
+          type: [string, 'null']
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    WebhookEndpointCreated:
+      allOf:
+        - $ref: '#/components/schemas/WebhookEndpoint'
+        - type: object
+          required: [secret]
+          properties:
+            secret:
+              type: string
+              description: HMAC 签名密钥，只在创建/轮换时返回一次
+
+    WebhookEndpointCreate:
+      type: object
+      required: [url, events]
+      properties:
+        url:
+          type: string
+          format: uri
+          pattern: '^https://'
+        events:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/WebhookEventType'
+        description:
+          type: string
+
+    WebhookEndpointUpdate:
+      type: object
+      properties:
+        url:
+          type: string
+          format: uri
+          pattern: '^https://'
+        events:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/WebhookEventType'
+        status:
+          type: string
+          enum: [ACTIVE, DISABLED]
+        description:
+          type: string
+
+    WebhookEndpointList:
+      allOf:
+        - $ref: '#/components/schemas/Pagination'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/WebhookEndpoint'
+
+    AuditEvent:
+      type: object
+      required: [id, occurred_at, action, target_type, result]
+      properties:
+        id:
+          type: string
+          format: uuid
+        occurred_at:
+          type: string
+          format: date-time
+        tenant_id:
+          type: [string, 'null']
+          format: uuid
+        organization_id:
+          type: [string, 'null']
+          format: uuid
+        actor_type:
+          type: string
+          enum: [USER, SERVICE_ACCOUNT, SYSTEM]
+        actor_id:
+          type: [string, 'null']
+          format: uuid
+        action:
+          type: string
+        target_type:
+          type: string
+        target_id:
+          type: [string, 'null']
+          format: uuid
+        result:
+          type: string
+          enum: [SUCCESS, DENIED, FAILURE]
+        request_id:
+          type: [string, 'null']
+        trace_id:
+          type: [string, 'null']
+        detail:
+          type: object
+          additionalProperties: true
+
+    AuditEventList:
+      allOf:
+        - $ref: '#/components/schemas/Pagination'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/AuditEvent'
+
+    AuditExportRequest:
+      type: object
+      required: [from, to, format]
+      properties:
+        from:
+          type: string
+          format: date-time
+        to:
+          type: string
+          format: date-time
+        format:
+          type: string
+          enum: [csv, jsonl]
+        filters:
+          type: object
+          additionalProperties: true
+
+    AuditExport:
+      type: object
+      required: [id, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [PENDING, RUNNING, COMPLETED, FAILED]
+        download_url:
+          type: [string, 'null']
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+
+    Extension:
+      type: object
+      required: [name, version, api_version, status, schema_name]
+      properties:
+        name:
+          type: string
+        version:
+          type: string
+        api_version:
+          type: string
+        status:
+          type: string
+          enum: [REGISTERED, ACTIVE, DISABLED]
+        schema_name:
+          type: string
+        manifest:
+          type: object
+          additionalProperties: true
+        installed_at:
+          type: [string, 'null']
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ExtensionList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Extension'
+
+    PlatformParam:
+      type: object
+      required: [key, value, is_public]
+      properties:
+        key:
+          type: string
+        value: {}
+        is_public:
+          type: boolean
+        description:
+          type: [string, 'null']
+        updated_by:
+          type: [string, 'null']
+          format: uuid
+        updated_at:
+          type: string
+          format: date-time
+
+    PlatformParamUpdate:
+      type: object
+      required: [value]
+      properties:
+        value: {}
+        is_public:
+          type: boolean
+        description:
+          type: string
+
+    PlatformParamList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlatformParam'
+
+    OutboxEvent:
+      type: object
+      required: [id, aggregate_type, aggregate_id, event_type, event_version, status, attempts, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: [string, 'null']
+          format: uuid
+        aggregate_type:
+          type: string
+        aggregate_id:
+          type: string
+          format: uuid
+        event_type:
+          type: string
+          maxLength: 128
+          pattern: '^(?:tenant\.(?:created|frozen|unfrozen|closed|membership\.(?:created|removed))|organization\.(?:created|frozen|unfrozen|archived)|ownership\.transfer\.(?:requested|accepted|forced)|extension\.(?:enabled|disabled)|ext\.[a-z0-9_]+(?:\.[a-z0-9_]+){2,3})$'
+          description: 具体事件编码（Outbox 行不得写通配前缀）；以 docs/20-design/event-catalog-v2.0.md §4/§6 为唯一清单
+        event_version:
+          type: integer
+          minimum: 1
+        status:
+          type: string
+          enum: [PENDING, DISPATCHED, FAILED, DEAD]
+        attempts:
+          type: integer
+        available_at:
+          type: string
+          format: date-time
+        last_error:
+          type: [string, 'null']
+        created_at:
+          type: string
+          format: date-time
+        dispatched_at:
+          type: [string, 'null']
+          format: date-time
+
+    OutboxEventList:
+      allOf:
+        - $ref: '#/components/schemas/Pagination'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/OutboxEvent'
+
+    RoleGrantScope:
+      type: object
+      required: [scope_type]
+      properties:
+        scope_type:
+          type: string
+          enum: [ALL, TENANT, ORGANIZATION, ORG_TYPE]
+        tenant_id:
+          type: [string, 'null']
+          format: uuid
+        organization_id:
+          type: [string, 'null']
+          format: uuid
+        org_type:
+          type: [string, 'null']
+        include_descendants:
+          type: boolean
+          default: false
+
+    RoleGrantCreate:
+      type: object
+      required: [role_id, scopes]
+      properties:
+        role_id:
+          type: string
+          format: uuid
+        scopes:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/RoleGrantScope'
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+
+    RoleGrant:
+      type: object
+      required: [id, user_id, role_id, status, scopes, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        role_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [ACTIVE, REVOKED, EXPIRED]
+        scopes:
+          type: array
+          items:
+            $ref: '#/components/schemas/RoleGrantScope'
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type: [string, 'null']
+          format: date-time
+
+    RoleGrantList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/RoleGrant'
+
+    ServiceTokenResponse:
+      type: object
+      required: [access_token, token_type, expires_in]
+      properties:
+        access_token:
+          type: string
+        token_type:
+          type: string
+          const: Bearer
+        expires_in:
+          type: integer
+        scope:
+          type: string
+
+    AcceptInvitationRequest:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+
+    InvitationList:
+      allOf:
+        - $ref: '#/components/schemas/Pagination'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/Invitation'
+
+    WebhookDelivery:
+      type: object
+      required: [id, endpoint_id, event_id, status, attempts, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        endpoint_id:
+          type: string
+          format: uuid
+        event_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [PENDING, DELIVERED, FAILED, DEAD]
+        attempts:
+          type: integer
+        next_attempt_at:
+          type: string
+          format: date-time
+        response_status:
+          type: [integer, 'null']
+        last_error:
+          type: [string, 'null']
+        created_at:
+          type: string
+          format: date-time
+        delivered_at:
+          type: [string, 'null']
+          format: date-time
+
+    WebhookDeliveryList:
+      allOf:
+        - $ref: '#/components/schemas/Pagination'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/WebhookDelivery'

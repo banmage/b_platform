@@ -123,15 +123,6 @@ def section(text: str, start: str, end: str | None = None) -> str:
     return text[i:j]
 
 
-def unique(seq):
-    seen, out = set(), []
-    for x in seq:
-        if x not in seen:
-            seen.add(x)
-            out.append(x)
-    return out
-
-
 def diff_lines(left, right, left_name: str, right_name: str) -> list[str]:
     out = []
     only_left = sorted(set(left) - set(right))

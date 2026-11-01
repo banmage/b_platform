@@ -1,0 +1,27 @@
+name: spec-check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  spec-check:
+    name: 基线一致性校验
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: pip install pyyaml
+
+      - name: 校验基线一致性
+        run: python3 scripts/spec-check/spec_check.py --strict
+
+      - name: 校验器自测（变异测试）
+        run: python3 scripts/spec-check/self_test.py

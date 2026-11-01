@@ -30,7 +30,7 @@
 - [ ] T002 [P] 配置 `golangci-lint`、`staticcheck`、`govulncheck`（`.golangci.yml`、`Makefile` 目标）
 - [ ] T003 [P] 建立 `deploy/docker-compose.yml`（postgres + api + worker + migrate）与多阶段 Dockerfile
 - [ ] T004 [P] 建立契约流水线：从 `docs/30-api/openapi-v2.0.yaml` 复制到 `api/openapi/` 并 `oapi-codegen` 生成类型（research R-01）
-- [ ] T005 [P] 实现 `scripts/spec-check/` 一致性校验（operationId/`$ref`/授权覆盖/错误码/事件/权限/FR 追溯），接入 CI（research R-06，宪法 VI）
+- [x] T005 [P] 实现 `scripts/spec-check/` 一致性校验（operationId/`$ref`/授权覆盖/错误码/事件/权限/FR 追溯），接入 CI（research R-06，宪法 VI）——17 项校验 + 17 个变异自测，`.github/workflows/spec-check.yml`
 - [ ] T006 [P] 建立 `Makefile` 目标：`lint`、`test-unit`、`test-integration`、`test-rls`、`test-contract`、`spec-check`、`migrate-up`、`seed`
 
 **Checkpoint**: `make lint && make spec-check` 可在空实现上通过

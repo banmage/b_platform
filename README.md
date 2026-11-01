@@ -93,7 +93,7 @@
 | [`docs/00-architecture/architecture-v2.0.md`](docs/00-architecture/architecture-v2.0.md) | 总体架构、控制面/数据面、模块边界 |
 | [`docs/00-architecture/decisions-v2.0.md`](docs/00-architecture/decisions-v2.0.md) | ADR-001 ~ ADR-010 |
 | [`docs/00-architecture/extension-spi-v2.0.md`](docs/00-architecture/extension-spi-v2.0.md) | 扩展模块 SPI、生命周期、权限/路由/迁移注册 |
-| [`docs/00-architecture/pre-review-decisions-v2.0.md`](docs/00-architecture/pre-review-decisions-v2.0.md) | 设计预评审决议记录（D-01~D-10，正式评审接口） |
+| [`docs/00-architecture/pre-review-decisions-v2.0.md`](docs/00-architecture/pre-review-decisions-v2.0.md) | 设计预评审决议记录（D-01~D-11，正式评审接口） |
 | [`docs/10-requirements/requirements-v2.0.md`](docs/10-requirements/requirements-v2.0.md) | V2.0 需求规格 |
 | [`docs/20-design/tech-design-v2.0.md`](docs/20-design/tech-design-v2.0.md) | Go 技术设计、请求生命周期、RLS、模块边界 |
 | [`docs/20-design/database-design-v2.0.md`](docs/20-design/database-design-v2.0.md) | PostgreSQL DDL、RLS、数据库角色、迁移 |
@@ -109,6 +109,12 @@
 
 V1.x 原始文档未随 V2.0 基线纳入本仓库（归档在项目组外部存储），仅用于追溯，不再作为开发基线；
 归档清单与 V2.0 替代关系见 [`docs/90-archive/README.md`](docs/90-archive/README.md)。
+
+**基线一致性门禁（2026-11-01 入库）：** [`scripts/spec-check/`](scripts/spec-check/README.md)
+对上述文档做 17 项机器校验（operationId 唯一性、`$ref` 可解析、授权声明覆盖、错误码/事件/权限点
+双向对齐、FR 派生关系与追溯、幂等豁免、链接有效性等），CI 见
+[`.github/workflows/spec-check.yml`](.github/workflows/spec-check.yml)。运行
+`python3 scripts/spec-check/spec_check.py` 即可本地复现。
 
 **清单与契约对齐状态（已机器验证，2026-10-31）：**
 
@@ -210,6 +216,7 @@ internal/core/
 - [x] 预评审完成（2026-10-31）：对抗性复核发现的 8 项 P1（ext 命名段数统一、is_dangerous 语义残留×4、13 个主体式操作 `x-subject-authz` 定义、OutboxEvent 通配洞、`archiveOrganization` 端点、one_time_token 撤销语义、force_managed 谓词、Principal 结构体统一）已全部修复并复验
 - [ ] 设计基线评审通过（不再重审全库一致性；仅对[预评审决议记录](docs/00-architecture/pre-review-decisions-v2.0.md) D-01~D-11 逐条确认）
 - [x] 建立远程 Git 仓库并提交设计基线（决议 D-10，开发启动前）——已完成 2026-11-01，tag `v2.0-design-baseline` 已推送至 `origin`
+- [x] 基线一致性校验入库并接入 CI（`scripts/spec-check/`，17 项校验 + 变异自测，2026-11-01）
 - [ ] Go 项目骨架
 - [ ] 数据库迁移实现
 - [ ] 核心模块实现

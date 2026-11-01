@@ -61,6 +61,8 @@
   权限点目录与契约一致。
 - **Rationale**：基线只留下"2026-10-31 已机器验证"的结论，脚本未入库；基线一旦漂移无法发现。
 - **Alternatives considered**：人工评审（不可持续）；只做一次性脚本（无法防回归）。
+- **Status（2026-11-01）**：已入库 `scripts/spec-check/`（17 项校验 + 变异自测），
+  CI 见 `.github/workflows/spec-check.yml`；`README.md` §4 入口待 T070 补。
 
 ## R-07 上下文切换审计
 
@@ -75,4 +77,4 @@
 | R-01 | `README.md` §6.1 技术栈表 | 明确 spec-first + `oapi-codegen`，`huma` 仅作校验 | 待回写（T070） |
 | R-04 | `docs/20-design/tech-design-v2.0.md` §9.1、OpenAPI | 幂等豁免清单 | tech §9.1 已回写（2026-11-01，13/13 与契约一致）；OpenAPI 注解待 T070 |
 | R-05 | `docs/20-design/database-design-v2.0.md` §9.5、§15 | 分区 RLS + 检查清单项 | 待回写（T070） |
-| R-06 | `README.md` §4、CI 配置 | 校验脚本入口 | 待回写（T070） |
+| R-06 | `README.md` §4、CI 配置 | 校验脚本入口 | 脚本与 CI 已入库（2026-11-01）；README §4 入口待 T070 |

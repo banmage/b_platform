@@ -107,7 +107,8 @@
 | [`docs/40-operations/operations-v2.0.md`](docs/40-operations/operations-v2.0.md) | 部署、运维、测试、安全、SLO |
 | [`docs/90-archive/README.md`](docs/90-archive/README.md) | V1.x 历史文档说明 |
 
-V1.x 原始文档已归档到 [`_archive/v1/`](_archive/v1/)，仅用于追溯，不再作为开发基线。
+V1.x 原始文档未随 V2.0 基线纳入本仓库（归档在项目组外部存储），仅用于追溯，不再作为开发基线；
+归档清单与 V2.0 替代关系见 [`docs/90-archive/README.md`](docs/90-archive/README.md)。
 
 **清单与契约对齐状态（已机器验证，2026-10-31）：**
 

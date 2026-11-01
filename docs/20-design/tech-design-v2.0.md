@@ -485,6 +485,10 @@ type Authorizer interface {
 ### 9.1 幂等
 
 - 关键写接口要求 `Idempotency-Key`。
+- 豁免清单（不要求幂等头，共 13 个操作）：`register`、`login`、`refresh`、`logout`、
+  `forgotPassword`、`resetPassword`、`verifyEmail`、`verifyPhone`、`switchContext`、
+  `revokeSession`、`updateMe`、`changePassword`、`clientCredentialsToken`。理由：天然幂等
+  （登出/撤销）、以一次性令牌或凭证为幂等键（验证/重置）、或为认证入口（重复提交无副作用累积）。
 - 键：`(principal_type, principal_id, endpoint, idem_key)`。
 - 首次请求在业务事务内插入 `IN_PROGRESS`，提交前写入响应快照。
 - 重复请求同哈希返回原响应；不同哈希返回 `409`。

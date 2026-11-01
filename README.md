@@ -208,8 +208,8 @@ internal/core/
 - [x] OpenAPI 契约机器可校验：`Problem.code` enum（41 码，与错误码目录零差异）、`WebhookEventType` 事件订阅白名单、`405 NOT_SUPPORTED` / `409 STATE_CONFLICT` 语义声明
 - [x] 状态机各节“审计动作”概要与审计目录双向同步
 - [x] 预评审完成（2026-10-31）：对抗性复核发现的 8 项 P1（ext 命名段数统一、is_dangerous 语义残留×4、13 个主体式操作 `x-subject-authz` 定义、OutboxEvent 通配洞、`archiveOrganization` 端点、one_time_token 撤销语义、force_managed 谓词、Principal 结构体统一）已全部修复并复验
-- [ ] 设计基线评审通过（不再重审全库一致性；仅对[预评审决议记录](docs/00-architecture/pre-review-decisions-v2.0.md) D-01~D-10 逐条确认）
-- [ ] 建立远程 Git 仓库并提交设计基线（决议 D-10，开发启动前）
+- [ ] 设计基线评审通过（不再重审全库一致性；仅对[预评审决议记录](docs/00-architecture/pre-review-decisions-v2.0.md) D-01~D-11 逐条确认）
+- [x] 建立远程 Git 仓库并提交设计基线（决议 D-10，开发启动前）——已完成 2026-11-01，tag `v2.0-design-baseline` 已推送至 `origin`
 - [ ] Go 项目骨架
 - [ ] 数据库迁移实现
 - [ ] 核心模块实现
